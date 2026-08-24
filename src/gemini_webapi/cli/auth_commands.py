@@ -23,6 +23,7 @@ from gemini_webapi.auth import paths as auth_paths
 from gemini_webapi.auth import playwright_login, resolver, storage_state
 from gemini_webapi.auth.playwright_login import LoginError, LoginPlan
 from gemini_webapi.auth.redaction import fingerprint
+from gemini_webapi.utils import set_log_level
 
 #: Exit codes. 0 success, 1 a real failure, 2 "nothing is wrong but there is no
 #: session" — the state a wrapper script wants to distinguish so it can trigger a
@@ -325,6 +326,29 @@ def cmd_doctor(args) -> int:
         report["resolved"]["source"] if report["resolved"] else "none",
     )
 
+    # Everything above is a file check. Whether Google still honours the session is not
+    # knowable offline - a session file can be perfect and the session dead (revoked,
+    # expired, or superseded), which is exactly the state that sends people to `doctor`.
+    if getattr(args, "live", False) and report["resolved"]:
+        from gemini_webapi.auth import resolver as _resolver
+        from gemini_webapi.auth.verify import verify_credentials
+
+        credentials = _resolver.resolve(profile=getattr(args, "profile", None))
+        probe = verify_credentials(credentials.psid, credentials.psidts)
+        _line(
+            "live session",
+            probe.ok is not False,
+            f"{probe.status} - {probe.detail}",
+        )
+        if probe.ok is False:
+            problems.append(
+                "Google does not accept the stored session any more. One interactive login "
+                "restores it: `notebooklm login` (writes the full cookie set both tools use) "
+                "or `gemini-web login`."
+            )
+        elif probe.unknown:
+            warnings.append(f"Could not reach Gemini to check the session live: {probe.detail}")
+
     if warnings:
         print("\nWarnings:")
         for item in warnings:
@@ -413,12 +437,26 @@ def register_parsers(sub) -> None:
     p_status.add_argument("--json", action="store_true", help="Machine-readable output")
     auth_sub.add_parser("purge", help="Delete pre-fork cache files that name a session id")
 
-    sub.add_parser("doctor", help="Check the auth setup and say how to fix what is broken")
+    p_doctor = sub.add_parser(
+        "doctor", help="Check the auth setup and say how to fix what is broken"
+    )
+    p_doctor.add_argument(
+        "--live",
+        action="store_true",
+        help="Also ask Gemini whether the stored session still works (one request). "
+        "The file checks cannot tell a valid session from a revoked one.",
+    )
 
 
 def dispatch(args) -> int | None:
     """Run the session command in ``args``, or return ``None`` if it is not ours."""
     command = args.command
+    if command in {"login", "logout", "auth", "doctor"}:
+        # These commands *are* the report. The library's own INFO/WARNING lines - which
+        # loguru prints to stderr through its default handler until someone configures
+        # it - would otherwise interleave a stack of "Account status: ..." warnings with
+        # the table that says the same thing more usefully. `--verbose` restores them.
+        set_log_level("DEBUG" if getattr(args, "verbose", False) else "ERROR")
     if command == "login":
         return cmd_login(args)
     if command == "logout":

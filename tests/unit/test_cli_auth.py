@@ -157,6 +157,63 @@ class TestDoctorCommand(unittest.TestCase):
                 marker.unlink(missing_ok=True)
 
 
+class TestDoctorLiveCheck(unittest.TestCase):
+    """`doctor --live` is the only check that can see a revoked session."""
+
+    def _with_probe(self, probe):
+        from gemini_webapi.auth import verify
+
+        original = verify._probe
+        verify._probe = probe
+        self.addCleanup(lambda: setattr(verify, "_probe", original))
+
+    def test_reports_a_working_session(self):
+        async def probe(*_a, **_k):
+            return "AVAILABLE", "Account is available.", True
+
+        self._with_probe(probe)
+        with IsolatedHome() as home:
+            home.write_storage(home.own_storage())
+            with captured() as (out, _err):
+                main(["doctor", "--live"])
+            self.assertIn("live session", out.getvalue())
+            self.assertIn("AVAILABLE", out.getvalue())
+
+    def test_a_revoked_session_is_a_problem_with_a_fix(self):
+        async def probe(*_a, **_k):
+            return "UNAUTHENTICATED", "Session is not authenticated.", False
+
+        self._with_probe(probe)
+        with IsolatedHome() as home:
+            home.write_storage(home.own_storage())
+            with captured() as (out, _err):
+                code = main(["doctor", "--live"])
+            self.assertEqual(code, auth_commands.EXIT_FAIL)
+            self.assertIn("notebooklm login", out.getvalue())
+
+    def test_an_unreachable_probe_is_only_a_warning(self):
+        async def probe(*_a, **_k):
+            raise ConnectionError("offline")
+
+        self._with_probe(probe)
+        with IsolatedHome() as home:
+            home.write_storage(home.own_storage())
+            with captured() as (out, _err):
+                main(["doctor", "--live"])
+            self.assertIn("Could not reach Gemini", out.getvalue())
+
+    def test_offline_doctor_never_probes(self):
+        async def probe(*_a, **_k):  # pragma: no cover - must not run
+            raise AssertionError("plain `doctor` must not touch the network")
+
+        self._with_probe(probe)
+        with IsolatedHome() as home:
+            home.write_storage(home.own_storage())
+            with captured() as (out, _err):
+                main(["doctor"])
+            self.assertNotIn("live session", out.getvalue())
+
+
 class TestLogoutCommand(unittest.TestCase):
     def test_removes_our_own_session_file_and_cache(self):
         with IsolatedHome() as home:
