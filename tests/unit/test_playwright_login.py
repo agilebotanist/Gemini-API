@@ -34,6 +34,21 @@ SIGNED_IN = [
     cookie_row("SAPISID", "a-cookie-we-must-not-store"),
 ]
 
+#: What a persistent profile looks like *before* the human switches accounts: it already
+#: holds a session, which is why "any PSID present" cannot mean "sign-in finished".
+SIGNED_IN_AS_SOMEONE_ELSE = [
+    cookie_row("__Secure-1PSID", OTHER_PSID),
+    cookie_row("__Secure-1PSIDTS", "sidts-CjIBtheOtherAccountsToken1"),
+]
+
+#: An interactive switch: the profile starts on one session and lands on another.
+SWITCHING = [SIGNED_IN_AS_SOMEONE_ELSE, SIGNED_IN_AS_SOMEONE_ELSE, SIGNED_IN]
+
+
+def instant(_delay):
+    """Replacement for `asyncio.sleep` so polling loops run at full speed."""
+    return asyncio.sleep(0)
+
 
 def run(coro):
     return asyncio.run(coro)
@@ -185,11 +200,12 @@ class TestCapture(unittest.TestCase):
         with IsolatedHome() as home:
             home.write_storage(home.own_storage(), psid=OTHER_PSID)
             plan = self._plan(home, allow_switch=True)
-            context = FakeContext(cookie_schedule=[SIGNED_IN])
+            context = FakeContext(cookie_schedule=SWITCHING)
             result = run(
                 login.capture(
                     plan,
                     launcher=fake_launcher(context),
+                    sleep=instant,
                     verifier=verifier_returning(True, "AVAILABLE"),
                 )
             )
@@ -205,11 +221,12 @@ class TestCapture(unittest.TestCase):
         with IsolatedHome() as home:
             home.write_storage(home.own_storage(), psid=OTHER_PSID)
             plan = self._plan(home, allow_switch=True)
-            context = FakeContext(cookie_schedule=[SIGNED_IN])
+            context = FakeContext(cookie_schedule=SWITCHING)
             result = run(
                 login.capture(
                     plan,
                     launcher=fake_launcher(context),
+                    sleep=instant,
                     verifier=verifier_returning(False, "UNAUTHENTICATED"),
                 )
             )
@@ -224,11 +241,12 @@ class TestCapture(unittest.TestCase):
         with IsolatedHome() as home:
             home.write_storage(home.own_storage(), psid=OTHER_PSID)
             plan = self._plan(home, allow_switch=True)
-            context = FakeContext(cookie_schedule=[SIGNED_IN])
+            context = FakeContext(cookie_schedule=SWITCHING)
             result = run(
                 login.capture(
                     plan,
                     launcher=fake_launcher(context),
+                    sleep=instant,
                     verifier=verifier_returning(None, "unknown"),
                 )
             )
@@ -240,7 +258,7 @@ class TestCapture(unittest.TestCase):
         with IsolatedHome() as home:
             home.write_storage(home.own_storage(), psid=OTHER_PSID)
             plan = self._plan(home, allow_switch=True, verify=False)
-            context = FakeContext(cookie_schedule=[SIGNED_IN])
+            context = FakeContext(cookie_schedule=SWITCHING)
             calls: list[str] = []
 
             def refusing_verifier(psid, psidts):  # pragma: no cover - must not run
@@ -248,7 +266,9 @@ class TestCapture(unittest.TestCase):
                 raise AssertionError("verification should have been skipped")
 
             result = run(
-                login.capture(plan, launcher=fake_launcher(context), verifier=refusing_verifier)
+                login.capture(
+                    plan, launcher=fake_launcher(context), sleep=instant, verifier=refusing_verifier
+                )
             )
             self.assertEqual(result.status, login.STATUS_CAPTURED)
             self.assertEqual(calls, [])
@@ -284,6 +304,82 @@ class TestCapture(unittest.TestCase):
                 login.capture(plan, launcher=fake_launcher(context), verifier=refusing_verifier)
             )
             self.assertEqual(result.status, login.STATUS_CAPTURED)
+
+    def test_switch_waits_for_the_session_to_actually_change(self):
+        # The bug this closes: a persistent profile already holds a PSID, so accepting
+        # "any PSID" closed the window on the first poll and the human never got to
+        # sign in. With --switch-account the signal is the cookie *changing*.
+        with IsolatedHome() as home:
+            home.write_storage(home.own_storage(), psid=OTHER_PSID)
+            plan = self._plan(home, allow_switch=True)
+            context = FakeContext(cookie_schedule=SWITCHING)
+            result = run(
+                login.capture(
+                    plan,
+                    launcher=fake_launcher(context),
+                    sleep=instant,
+                    verifier=verifier_returning(True, "AVAILABLE"),
+                )
+            )
+            self.assertEqual(result.status, login.STATUS_CAPTURED)
+            self.assertGreaterEqual(context.poll_count, 3)  # it did not stop at the baseline
+            self.assertEqual(store.load(plan.storage_path).psid, FAKE_PSID)
+
+    def test_switch_that_never_changes_times_out_without_writing(self):
+        with IsolatedHome() as home:
+            home.write_storage(home.own_storage(), psid=OTHER_PSID)
+            plan = self._plan(home, allow_switch=True)
+            context = FakeContext(cookie_schedule=[SIGNED_IN_AS_SOMEONE_ELSE])
+            clock = iter([0.0, 0.0, 999.0])
+            result = run(
+                login.capture(
+                    plan,
+                    launcher=fake_launcher(context),
+                    sleep=instant,
+                    monotonic=lambda: next(clock, 999.0),
+                )
+            )
+            self.assertEqual(result.status, login.STATUS_TIMEOUT)
+            self.assertIn("did not change", result.message)
+            self.assertEqual(store.load(plan.storage_path).psid, OTHER_PSID)
+
+    def test_closing_the_window_stops_immediately(self):
+        # A closed browser is not "keep polling for five minutes".
+        with IsolatedHome() as home:
+            home.write_storage(home.own_storage(), psid=OTHER_PSID)
+            plan = self._plan(home, allow_switch=True)
+            context = FakeContext(cookie_schedule=[SIGNED_IN_AS_SOMEONE_ELSE], die_after=2)
+            result = run(login.capture(plan, launcher=fake_launcher(context), sleep=instant))
+            self.assertEqual(result.status, login.STATUS_NO_SESSION)
+            self.assertIn("closed", result.message)
+            self.assertEqual(store.load(plan.storage_path).psid, OTHER_PSID)
+
+    def test_switch_starts_on_googles_add_account_page(self):
+        with IsolatedHome() as home:
+            plan = self._plan(home, allow_switch=True)
+            self.assertEqual(plan.target_url, login.GOOGLE_ADD_SESSION_URL)
+            self.assertEqual(self._plan(home).target_url, login.GEMINI_APP_URL)
+            # Headless has no human to click an account chooser.
+            self.assertEqual(
+                self._plan(home, allow_switch=True, headless=True).target_url,
+                login.GEMINI_APP_URL,
+            )
+
+    def test_headless_never_waits_for_a_change(self):
+        with IsolatedHome() as home:
+            home.write_storage(home.own_storage(), psid=OTHER_PSID)
+            plan = self._plan(home, allow_switch=True, headless=True)
+            context = FakeContext(cookie_schedule=[SIGNED_IN])
+            result = run(
+                login.capture(
+                    plan,
+                    launcher=fake_launcher(context),
+                    sleep=instant,
+                    verifier=verifier_returning(True, "AVAILABLE"),
+                )
+            )
+            self.assertEqual(result.status, login.STATUS_CAPTURED)
+            self.assertEqual(context.poll_count, 1)
 
     def test_timeout_writes_nothing(self):
         with IsolatedHome() as home:

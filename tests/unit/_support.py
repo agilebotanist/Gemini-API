@@ -188,8 +188,13 @@ class FakeContext:
     closed: bool = False
     poll_count: int = 0
     fail_goto: bool = False
+    #: Poll number after which reads start failing, modelling a human closing the
+    #: window mid-login. ``None`` means the context stays alive.
+    die_after: int | None = None
 
     async def cookies(self) -> list[dict[str, Any]]:
+        if self.die_after is not None and self.poll_count >= self.die_after:
+            raise RuntimeError("Target page, context or browser has been closed")
         index = min(self.poll_count, len(self.cookie_schedule) - 1)
         self.poll_count += 1
         return list(self.cookie_schedule[index])

@@ -52,6 +52,13 @@ from .redaction import fingerprint, register_secret
 #: chooser when there is no session, so reaching it signed-out is the normal start of
 #: an interactive login rather than an error.
 GEMINI_APP_URL = "https://gemini.google.com/app"
+#: Where an interactive `--switch-account` run starts. Landing on the Gemini app when
+#: the profile already has a session shows that session's chat list, with the account
+#: switcher several clicks away; Google's own add-account entry point is the page the
+#: user is actually looking for, and it continues to Gemini once they are done.
+GOOGLE_ADD_SESSION_URL = (
+    "https://accounts.google.com/AddSession?continue=https%3A%2F%2Fgemini.google.com%2Fapp"
+)
 
 #: Default patience for a human completing a Google login: password, 2FA, consent
 #: screens, occasionally a device prompt. Shorter defaults produce "it timed out while
@@ -147,6 +154,9 @@ class LoginPlan:
             browser_profile_dir=resolved_browser,
             shared=target.shared,
             headless=headless,
+            target_url=GOOGLE_ADD_SESSION_URL
+            if (allow_switch and not headless)
+            else GEMINI_APP_URL,
             timeout=timeout
             if timeout is not None
             else (DEFAULT_REFRESH_TIMEOUT if headless else DEFAULT_LOGIN_TIMEOUT),
@@ -291,16 +301,51 @@ async def capture(
     deadline = monotonic() + max(plan.timeout, 0.0)
     rows: list[dict[str, Any]] = []
     announced = False
+    baseline: str | None = None
+    wait_for_change = False
+    window_closed = False
 
     async with launcher(plan) as context:
         page = await _open_page(context, plan, emit)
         if page is None and not plan.headless:
             emit("Could not open a browser page; polling the profile's cookies instead.")
 
+        first_poll = True
         while True:
-            rows = policy.filter_cookies(await _read_cookies(context))
+            observed = await _read_cookies(context)
+            if observed is None:
+                # The window is gone. Whatever the last successful read saw is all we
+                # will ever have, so stop rather than spin until the timeout.
+                window_closed = True
+                break
+            rows = policy.filter_cookies(observed)
             psid, psidts = policy.credentials_from_rows(rows)
-            if psid:
+
+            if first_poll:
+                first_poll = False
+                baseline = psid
+                # A persistent profile usually *already* holds a session cookie, so
+                # "any PSID is present" cannot mean "the human is done" in an
+                # interactive run: the window would close before they could type
+                # anything. When the session already there is not the one we want -
+                # they asked to switch accounts, or it disagrees with the stored one -
+                # the signal to wait for is the cookie *changing*.
+                # Only when the user explicitly asked to switch. A plain `login` that
+                # finds a session it may not use fails fast with the mismatch message
+                # instead of holding a browser window open for five minutes.
+                wait_for_change = not plan.headless and psid is not None and plan.allow_switch
+                if wait_for_change:
+                    emit(
+                        "The browser profile already holds a session "
+                        f"({fingerprint(psid)}). Sign in - or use Google's account "
+                        "switcher to add the account you want - in the window that just "
+                        "opened.\n"
+                        "  The window closes by itself once a different session appears. "
+                        "Closing it yourself cancels without writing anything."
+                    )
+                    announced = True
+
+            if psid and not (wait_for_change and psid == baseline):
                 register_secret(psid, psidts)
                 break
             if monotonic() >= deadline:
@@ -314,6 +359,21 @@ async def capture(
             await sleep(plan.poll_interval)
 
     psid, psidts = policy.credentials_from_rows(rows)
+    if wait_for_change and psid == baseline:
+        # Timed out, or the window was closed, without the session changing.
+        return LoginResult(
+            status=STATUS_NO_SESSION if window_closed else STATUS_TIMEOUT,
+            storage_path=plan.storage_path,
+            shared=plan.shared,
+            previous_psid=previous_psid_fp,
+            message=(
+                "The browser window closed before a new session appeared. Nothing was written."
+                if window_closed
+                else f"Timed out after {plan.timeout:g}s: the browser profile's session did "
+                f"not change ({fingerprint(baseline)}). Nothing was written.\n"
+                "  Sign in fully in the window before it times out, or raise --timeout."
+            ),
+        )
     if not psid:
         if plan.headless:
             return LoginResult(
@@ -362,9 +422,13 @@ async def capture(
             "The browser profile's session "
             f"({fingerprint(psid)}) is not the one stored in {plan.storage_path} "
             f"({previous_psid_fp}). Nothing was written.\n"
-            "  If you meant to switch accounts:  gemini-web login --switch-account\n"
-            "  Otherwise the stored session is still the good one - a browser profile "
-            "can hold a stale cookie for the same account.",
+            "  To sign in and replace it - another account, or the same one after the "
+            "stored session expired:\n"
+            "      gemini-web login --switch-account\n"
+            "    That opens Google's account chooser and waits for you to finish; the new "
+            "session is checked against Gemini before it is stored.\n"
+            "  If you did not mean to change anything, the stored session is still the "
+            "good one - a browser profile can hold a stale cookie for the same account.",
         )
 
     verified: bool | None = None
@@ -448,12 +512,17 @@ async def _open_page(context: Any, plan: LoginPlan, emit: Callable[[str], None])
     return page
 
 
-async def _read_cookies(context: Any) -> Iterable[Any]:
-    """Return the context's cookies, or an empty list if it is already gone."""
+async def _read_cookies(context: Any) -> Iterable[Any] | None:
+    """Return the context's cookies, or ``None`` if the browser is gone.
+
+    The distinction matters: an empty jar means "not signed in yet, keep waiting",
+    while a failed read means the human closed the window, and waiting out the full
+    timeout on a browser that no longer exists is just a five-minute hang.
+    """
     try:
         cookies = await context.cookies()
     except Exception:
-        return []
+        return None
     return cookies or []
 
 
