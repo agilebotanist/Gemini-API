@@ -28,6 +28,8 @@ import os
 import tempfile
 from dataclasses import dataclass
 
+from gemini_webapi.exceptions import AuthError
+
 from .paths import GEMINI_AUTH_WRITEBACK_ENV, GEMINI_COOKIE_PATH_ENV
 from .redaction import fingerprint
 
@@ -81,6 +83,16 @@ async def averify_credentials(
         try:
             status_name, description, authenticated = await _probe(
                 psid, psidts, timeout=timeout, proxy=proxy
+            )
+        except AuthError as exc:
+            # A definitive rejection, not a failure to ask: the handshake reached Google
+            # and Google refused the cookies. Reporting this as "unknown" costs the user
+            # the one diagnosis they came for.
+            return VerifyResult(
+                ok=False,
+                status="REJECTED",
+                detail=f"Google refused these cookies ({type(exc).__name__}).",
+                psid=fingerprint(psid),
             )
         except Exception as exc:  # network down, endpoint changed, cancelled probe
             return VerifyResult(

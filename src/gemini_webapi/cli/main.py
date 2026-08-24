@@ -28,7 +28,7 @@ from gemini_webapi import GeminiClient, logger, set_log_level
 from gemini_webapi.auth import paths as auth_paths
 from gemini_webapi.auth import resolve as resolve_credentials
 from gemini_webapi.auth.redaction import fingerprint, register_secret
-from gemini_webapi.constants import BROWSER_TYPE
+from gemini_webapi.constants import BROWSER_TYPE, Headers
 from gemini_webapi.exceptions import AuthError
 from gemini_webapi.types.image import GeneratedImage, WebImage
 
@@ -254,6 +254,27 @@ async def _cleanup(client, args, json_cookies):
 # ---------------------------------------------------------------------------
 
 
+async def _save_images(output, directory, verbose=False):
+    """Save every image in ``output`` through the live client session.
+
+    The URLs Gemini prints are short-lived and require the session that produced them,
+    so the reliable way to keep an image is to write it while the client is still open -
+    rather than copying a URL into a second command and racing its expiry.
+    """
+    if not output or not output.images:
+        print("No images in the response.")
+        return
+    target = Path(directory)
+    target.mkdir(parents=True, exist_ok=True)
+    for index, image in enumerate(output.images, 1):
+        try:
+            saved = await image.save(path=str(target), verbose=verbose)
+        except Exception as exc:
+            print(f"  image {index}: FAILED ({type(exc).__name__}: {exc})")
+            continue
+        print(f"  image {index}: {saved}")
+
+
 def _print_images(output):
     if not output or not output.images:
         return
@@ -294,6 +315,8 @@ async def cmd_ask(args):
             )
             print(output.text)
             _print_images(output)
+            if args.save_images:
+                await _save_images(output, args.save_images, args.verbose)
             _print_chat_id(output)
         else:
             output = None
@@ -307,6 +330,8 @@ async def cmd_ask(args):
             if output:
                 print()
                 _print_images(output)
+                if args.save_images:
+                    await _save_images(output, args.save_images, args.verbose)
                 _print_chat_id(output)
         return 0
     finally:
@@ -334,6 +359,8 @@ async def cmd_reply(args):
             output = await chat.send_message(args.prompt)
             print(output.text)
             _print_images(output)
+            if args.save_images:
+                await _save_images(output, args.save_images, args.verbose)
         else:
             output = None
             async for output in chat.send_message_stream(args.prompt):
@@ -342,6 +369,8 @@ async def cmd_reply(args):
             if output:
                 print()
                 _print_images(output)
+                if args.save_images:
+                    await _save_images(output, args.save_images, args.verbose)
 
         print(f"\n---\nChat ID: {args.chat_id}")
         return 0
@@ -498,10 +527,35 @@ async def cmd_read(args):
 
 
 async def cmd_download(args):
-    """Download a generated image using authenticated curl_cffi session."""
+    """Download a generated image using an authenticated curl_cffi session.
+
+    Generated-image URLs on ``googleusercontent.com`` are **not** public: without the
+    session cookies they answer 403. This command used to read cookies from
+    ``--cookies-json`` alone, so it failed for anyone whose session came from the
+    stored session file - which is now the normal case, and made `ask` (which prints an
+    image URL) and `download` (which could not fetch it) disagree about being logged in.
+    """
     json_cookies = {}
     if args.cookies_json:
         json_cookies, _ = _load_cookies_with_meta(args.cookies_json)
+        register_secret(*json_cookies.values())
+
+    cookies = dict(json_cookies)
+    credentials = resolve_credentials(
+        psid=json_cookies.get("__Secure-1PSID"),
+        psidts=json_cookies.get("__Secure-1PSIDTS"),
+    )
+    if credentials is not None:
+        # Explicit --cookies-json values already won inside `resolve`; this fills in the
+        # session cookies for every other source.
+        cookies.update(credentials.as_dict())
+        if args.verbose:
+            logger.debug(
+                f"Downloading with credentials from {credentials.source} "
+                f"(psid={fingerprint(credentials.psid)})."
+            )
+    elif args.verbose:
+        logger.debug("No session found; attempting an unauthenticated download.")
 
     from curl_cffi.requests import AsyncSession
 
@@ -523,12 +577,21 @@ async def cmd_download(args):
 
     async with AsyncSession(
         impersonate=BROWSER_TYPE,
-        cookies=json_cookies,
+        cookies=cookies,
         proxy=args.proxy,
         allow_redirects=CurlFollow.SAFE,
         http_version=CurlHttpVersion.NONE,
     ) as session:
-        resp = await session.get(url)
+        # `Headers.REFERER` is not decoration: googleusercontent rejects a cookie-only
+        # request for a generated image with 403. The library's own `Image.save` sends
+        # it, which is why saving through the API worked while this command did not.
+        resp = await session.get(url, headers=Headers.REFERER.value)
+        if resp.status_code in (401, 403):
+            raise SystemExit(
+                f"Download failed: HTTP {resp.status_code}. Generated-image URLs require "
+                "the Google session that produced them.\n"
+                "  Check it with `gemini-web doctor --live`; refresh with `gemini-web login`."
+            )
         if resp.status_code != 200:
             raise SystemExit(f"Download failed: HTTP {resp.status_code}")
         ct = resp.headers.get("content-type", "")
@@ -679,12 +742,26 @@ def build_parser():
     p_ask.add_argument("prompt", help="Prompt text")
     p_ask.add_argument("--no-stream", action="store_true")
     p_ask.add_argument("--image", default=None)
+    p_ask.add_argument(
+        "--save-images",
+        default=None,
+        metavar="DIR",
+        help="Save every image in the reply to DIR, through the session that made them. "
+        "More reliable than copying the URL into `download`: those URLs expire.",
+    )
 
     # reply
     p_reply = sub.add_parser("reply", help="Continue chat")
     p_reply.add_argument("chat_id", help="Chat ID (c_...)")
     p_reply.add_argument("prompt", help="Prompt text")
     p_reply.add_argument("--no-stream", action="store_true")
+    p_reply.add_argument(
+        "--save-images",
+        default=None,
+        metavar="DIR",
+        help="Save every image in the reply to DIR. Image edits arrive as replies, so a "
+        "'fix panel 2' round trip needs this as much as the first generation does.",
+    )
 
     # research
     p_res = sub.add_parser("research", help="Deep research")

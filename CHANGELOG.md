@@ -28,6 +28,8 @@ credential handling that treats Google session cookies as secrets.
 * **`gemini-web logout`** / **`gemini-web auth purge`** — delete local credential material.
   `logout` leaves a shared session file alone unless `--shared` is passed, and states
   that the Google session itself is still valid server-side.
+* **`ask --save-images DIR` / `reply --save-images DIR`** — save generated images through
+  the live session instead of copying a URL into `download`, whose URLs expire.
 * **`gemini-web` console script** and `--profile` / `--no-shared` global flags. Multiple
   profiles, one per Google account. (ADR-0007)
 * **`gemini_webapi.auth`** — a public, documented credential layer: `resolve`, `status`,

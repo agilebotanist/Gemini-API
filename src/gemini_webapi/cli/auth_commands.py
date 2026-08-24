@@ -342,9 +342,15 @@ def cmd_doctor(args) -> int:
         )
         if probe.ok is False:
             problems.append(
-                "Google does not accept the stored session any more. One interactive login "
-                "restores it: `notebooklm login` (writes the full cookie set both tools use) "
-                "or `gemini-web login`."
+                "Google does not accept the stored session any more. Restore it with one "
+                "login:\n"
+                "      notebooklm login --browser-cookies chrome --account EMAIL  "
+                "(Chrome fully closed)\n"
+                "      gemini-web login --switch-account                          "
+                "(browser window)\n"
+                "    A session imported from a running browser goes stale quickly - the "
+                "browser keeps rotating the same credential. For a durable one, mint a "
+                "master token: `notebooklm login --master-token --account EMAIL`."
             )
         elif probe.unknown:
             warnings.append(f"Could not reach Gemini to check the session live: {probe.detail}")

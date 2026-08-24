@@ -61,6 +61,19 @@ class TestProbeOutcomes(unittest.TestCase):
         self.assertIs(result.ok, False)
         self.assertEqual(result.status, "UNAUTHENTICATED")
 
+    def test_auth_error_is_a_rejection_not_an_unknown(self):
+        # Google answered and said no. Calling that "could not reach Gemini" hides the
+        # one fact the user needs.
+        from gemini_webapi.exceptions import AuthError
+
+        async def probe(*_args, **_kwargs):
+            raise AuthError("401")
+
+        result = self._run(probe)
+        self.assertIs(result.ok, False)
+        self.assertEqual(result.status, "REJECTED")
+        self.assertIn("refused", result.detail)
+
     def test_network_failure_is_unknown_not_invalid(self):
         async def probe(*_args, **_kwargs):
             raise ConnectionError("no route to host")

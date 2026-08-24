@@ -95,6 +95,26 @@ gemini-web research get <c_chat_id> --output research.md
 Don't block on step 2 in a tight loop. Submit, do other work, come back. For a long run,
 hand the polling to a background agent.
 
+## Generating images
+
+```bash
+gemini-web --model gemini-pro ask --no-stream "Define <style> visual style for image generation"
+gemini-web --model gemini-pro reply <c_id> --no-stream --save-images ./media "<one-line scene>"
+```
+
+**Two short prompts beat one long one.** Turn 1 makes the model commit to a definition of
+the style; turn 2 gives it the scene and nothing else. A long prescriptive scene prompt
+overrides the primed style and yields generic clip-art — verified both ways on the same
+subject.
+
+* **`--save-images DIR`, never the URL.** Generated-image URLs are short-lived and need
+  the session that produced them; `download` on a stale one returns 403.
+* **Fix defects with `reply`, one per turn.** The edit keeps the rest of the drawing.
+* **Text in images is the weak point.** Quote the wanted text exactly and keep it short;
+  re-issuing the same long line just re-mangles it.
+* **Check for watermarks.** Models sometimes stamp a real copyright line (`©dilbert.com`
+  was produced unprompted). Ask for its removal; never ship it.
+
 ## Research discipline: output is a lead, never a citation
 
 Gemini Deep Research paraphrases and attributes loosely. For literature work
