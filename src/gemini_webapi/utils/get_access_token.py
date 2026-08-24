@@ -166,6 +166,66 @@ def _fill_missing(jar: Cookies, extra: Cookies) -> Cookies:
     return merged
 
 
+def _storage_state_jars(
+    base_psid: str | None,
+    tried_sessions: dict[str, set[str]],
+    verbose: bool = False,
+) -> list[tuple[Cookies, str, str]]:
+    """Return candidate cookie jars from the Playwright storage state.
+
+    Skipped when the file holds a *different* ``__Secure-1PSID`` than the caller
+    supplied — a mismatch means two Google accounts, and quietly authenticating as the
+    other one is worse than failing. Also skipped when the cache already covered the
+    same ``(psid, psidts)`` pair, which is the common case once a client has run once.
+
+    Returns at most one jar. Errors are swallowed: this is one rung of a ladder that
+    still has the browser and guest rungs below it.
+    """
+    try:
+        from gemini_webapi.auth import cookie_policy as policy
+        from gemini_webapi.auth import resolver
+        from gemini_webapi.auth.redaction import fingerprint
+    except Exception:  # pragma: no cover - defensive, the auth package ships with us
+        return []
+
+    try:
+        rows = resolver.storage_cookie_rows()
+    except Exception:  # pragma: no cover - resolver already degrades internally
+        return []
+    if not rows:
+        if verbose:
+            logger.debug("Skipping the stored session: no usable cookies found.")
+        return []
+
+    psid, psidts = policy.credentials_from_rows(rows)
+    if not psid:
+        return []
+    if base_psid and base_psid != psid:
+        if verbose:
+            logger.debug(
+                "Skipping the stored session: its __Secure-1PSID "
+                f"({fingerprint(psid)}) is not the one provided ({fingerprint(base_psid)})."
+            )
+        return []
+    if (psidts or "") in tried_sessions.get(psid, set()):
+        if verbose:
+            logger.debug("Skipping the stored session: already covered by cached cookies.")
+        return []
+
+    jar = Cookies()
+    for row in rows:
+        jar.set(
+            row["name"],
+            row["value"],
+            domain=row.get("domain", _COOKIE_DOMAIN),
+            path=row.get("path", _COOKIE_PATH),
+            secure=True,
+        )
+    if verbose:
+        logger.debug(f"Prepared the stored session ({fingerprint(psid)}).")
+    return [(jar, "Stored Session", psid)]
+
+
 async def _send_request(
     client: AsyncSession, cookies: dict | Cookies, verbose: bool = False
 ) -> Response:
@@ -289,7 +349,11 @@ async def get_access_token(
         elif cache_files := list(_get_cookie_cache_dir().glob(".cached_cookies_*.json")):
             cache_file = max(cache_files, key=lambda p: p.stat().st_mtime)
             if (jar := _load_cached_jar(cache_file, verbose=verbose)) is not None:
-                register(jar, "Cache (Latest)", cache_file.stem[16:])
+                # The session id comes from the jar, not from the filename: cache files
+                # are now named by a digest of `__Secure-1PSID` rather than the value
+                # itself (ADR-0005), so slicing the stem would key `tried_sessions` on
+                # a hash and defeat its de-duplication.
+                register(jar, "Cache (Latest)", _extract_cookie_value(jar, "__Secure-1PSID"))
 
         # User provided cookies, skipped if the cache already covers the same session
         if base_psid:
@@ -299,6 +363,14 @@ async def get_access_token(
                 logger.debug("Skipping base cookies as they match cached cookies.")
         elif verbose and not cookie_jars_to_test:
             logger.debug("Skipping loading base cookies. __Secure-1PSID is not provided.")
+
+        # The Playwright storage state, shared with notebooklm by default. Ranked above
+        # local browser cookies because it is this package's own store, written by a
+        # login we performed and refreshed by whichever tool rotated last; reading
+        # another browser's cookie database is the fallback, not the primary
+        # (ADR-0002, ADR-0003).
+        for jar, group_name, jar_psid in _storage_state_jars(base_psid, tried_sessions, verbose):
+            register(jar, group_name, jar_psid)
 
         # Local browser cookies as the last authenticated source
         try:

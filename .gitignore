@@ -207,3 +207,16 @@ temp/
 # Cookies and credentials
 cookies.json
 *.cookies
+
+# --- Credential material (this fork) ---------------------------------------------
+# The fork's auth layer writes Playwright session files, a rotated-cookie cache and a
+# persistent browser profile. None of it may ever reach a commit - and this fork is
+# PUBLIC, because GitHub forks of public repos cannot be made private (ADR-0001).
+# A `gitleaks` pre-commit hook backs these patterns up; see .pre-commit-config.yaml.
+storage_state.json
+*storage_state*.json
+.cached_cookies_*.json
+browser_profile/
+.gemini-webapi/
+# Lock sentinels sitting beside a session file
+.*.lock

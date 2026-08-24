@@ -1,0 +1,58 @@
+# Hooks that catch the two mistakes this repository is most exposed to: a lint
+# regression, and a credential in a commit. Install with:
+#
+#     pip install pre-commit && pre-commit install
+#
+# The secret hooks matter more than usual here - the fork is public and its whole
+# subject is Google session cookies (ADR-0001, ADR-0005).
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.9.6
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-added-large-files
+        # A committed browser profile would be both a credential leak and a huge diff.
+        args: [--maxkb=512]
+      - id: check-merge-conflict
+      - id: check-toml
+      - id: check-yaml
+      - id: detect-private-key
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: trailing-whitespace
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.23.3
+    hooks:
+      - id: gitleaks
+
+  - repo: local
+    hooks:
+      # gitleaks knows about API keys, not about Google session cookies. This is the
+      # shape ours take: `g.a0` followed by a long opaque token, and the `sidts-` prefix
+      # of the rotating one. Test fixtures are exempt - they carry deliberately
+      # realistic values so the scrubber's heuristics are exercised (ADR-0008).
+      - id: no-google-session-cookies
+        name: no Google session cookies in the tree
+        entry: >-
+          python -c "import re,sys;
+          pat=re.compile(r'(g\.a0[A-Za-z0-9_\-]{24,}|sidts-[A-Za-z0-9_\-]{20,})');
+          bad=[f for f in sys.argv[1:]
+               if not f.startswith('tests/') and pat.search(open(f,encoding='utf-8',errors='ignore').read())];
+          sys.exit('Possible session cookie in: '+', '.join(bad) if bad else 0)"
+        language: system
+        types: [text]
+
+      - id: offline-tests
+        name: offline test suite
+        entry: pytest tests/unit -q
+        language: system
+        pass_filenames: false
+        types: [python]

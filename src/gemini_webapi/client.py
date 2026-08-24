@@ -91,8 +91,14 @@ from .utils import (
 class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
     """Async requests client interface for gemini.google.com.
 
-    `secure_1psid` must be provided unless the optional dependency `browser-cookie3` is installed, and
-    you have logged in to google.com in your local browser.
+    Cookies are resolved by :func:`gemini_webapi.utils.get_access_token` along a ladder,
+    so `secure_1psid` is optional: an explicit value wins, then the cookie cache, then
+    the Playwright storage state written by `gemini-web login` (shared with `notebooklm` by
+    default - see `gemini_webapi.auth`), then a local browser's cookie database if
+    `browser-cookie3` is installed, then a guest session.
+
+    Run `gemini-web login` once if none of those apply. `gemini-web auth status` reports which
+    rung a session came from.
 
     Parameters
     ----------

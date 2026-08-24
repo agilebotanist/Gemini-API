@@ -1,11 +1,12 @@
-import os
-import tempfile
 import time
 from pathlib import Path
 
 import orjson as json
 from curl_cffi.requests import AsyncSession, Cookies
 
+from gemini_webapi.auth import paths as auth_paths
+from gemini_webapi.auth import writeback
+from gemini_webapi.auth.redaction import fingerprint, register_secret
 from gemini_webapi.constants import Endpoint, Headers, format_http_version
 from gemini_webapi.exceptions import AuthError
 
@@ -18,20 +19,30 @@ def _extract_cookie_value(cookies: Cookies, name: str) -> str | None:
 
 
 def _get_cookie_cache_dir() -> Path:
-    """Lazy helper to get the cookie cache directory."""
-    _path = os.getenv("GEMINI_COOKIE_PATH")
-    return Path(_path) if _path else Path(tempfile.gettempdir()) / "gemini_webapi"
+    """Lazy helper to get the cookie cache directory.
+
+    Delegates to :func:`gemini_webapi.auth.paths.cookie_cache_dir`, which moved the
+    default out of the shared temp directory. ``GEMINI_COOKIE_PATH`` still overrides.
+    """
+    return auth_paths.cookie_cache_dir()
 
 
 def _get_cookies_cache_path(cookies: Cookies, verbose: bool = False) -> Path | None:
-    """Helper to get and ensure the cache file path based on __Secure-1PSID."""
+    """Helper to get the cache file path for the session in ``cookies``.
+
+    The filename carries a truncated SHA-256 of ``__Secure-1PSID``, not the value
+    itself. Before the fork it was the raw cookie, in a world-readable temp directory:
+    a directory listing handed over a working Google session, and no file permission
+    could fix that because the leak was the *name* (ADR-0005). Old files are found and
+    removed by ``gemini-web auth purge``.
+    """
     secure_1psid = _extract_cookie_value(cookies, "__Secure-1PSID")
     if not secure_1psid:
         if verbose:
             logger.warning("Cannot save cookies: __Secure-1PSID not found.")
         return None
 
-    return _get_cookie_cache_dir() / f".cached_cookies_{secure_1psid}.json"
+    return auth_paths.cookie_cache_path(secure_1psid)
 
 
 async def rotate_1psidts(client: AsyncSession, verbose: bool = False) -> str | None:
@@ -82,6 +93,8 @@ async def rotate_1psidts(client: AsyncSession, verbose: bool = False) -> str | N
 
     save_cookies(client.cookies, verbose)
     if new_1psidts := _extract_cookie_value(client.cookies, "__Secure-1PSIDTS"):
+        if verbose:
+            logger.debug(f"Rotated __Secure-1PSIDTS ({fingerprint(new_1psidts)}).")
         return new_1psidts
 
     cookie_names = [c.name for c in client.cookies.jar]
@@ -120,10 +133,25 @@ def clear_cookies_cache(cookies: Cookies, verbose: bool = False) -> None:
 
 
 def save_cookies(cookies: Cookies, verbose: bool = False) -> None:
-    """Save persistent cookies to cache file."""
+    """Save persistent cookies to the cache file, and back to the shared session file.
+
+    Two destinations, one call site, because both must happen on exactly the same
+    events (a rotation, and a client shutdown):
+
+    * the **cache**, which is this package's fast path on the next start;
+    * the **storage state**, which may be shared with ``notebooklm``. A rotation
+      invalidates the previous ``__Secure-1PSIDTS``, so keeping the new one to
+      ourselves would log the other tool out of a session the user established once
+      (ADR-0006). Disable with ``GEMINI_AUTH_WRITEBACK=0``.
+
+    The write-back is best-effort: it never raises into the rotation path, which runs
+    in a background task whose failure the user cannot see.
+    """
     path = _get_cookies_cache_path(cookies, verbose)
     if not path:
         return
+
+    _writeback_to_storage_state(cookies, verbose)
 
     cookie_list = []
     for cookie in cookies.jar:
@@ -144,8 +172,26 @@ def save_cookies(cookies: Cookies, verbose: bool = False) -> None:
             )
 
     if cookie_list:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        # The directory is created owner-only, not just the file: on the previous
+        # default (a shared temp dir) the enclosing directory was world-listable, and
+        # a 0600 file inside a 0777 directory still leaks who has a session and when.
+        auth_paths.secure_mkdir(path.parent)
         path.write_text(json.dumps(cookie_list).decode("utf-8"))
-        path.chmod(0o600)  # Restrict cookie cache to owner read/write only
+        auth_paths.harden_file(path)  # owner read/write only
         if verbose:
             logger.debug(f"Saved cookies to cache successfully ({len(cookie_list)} cookies).")
+
+
+def _writeback_to_storage_state(cookies: Cookies, verbose: bool = False) -> None:
+    """Mirror the current Gemini cookies into the (possibly shared) storage state."""
+    psid = _extract_cookie_value(cookies, "__Secure-1PSID")
+    psidts = _extract_cookie_value(cookies, "__Secure-1PSIDTS")
+    register_secret(psid, psidts)
+    try:
+        changed = writeback.sync_from_jar(cookies.jar)
+    except Exception as e:  # pragma: no cover - defensive: rotation must not fail here
+        if verbose:
+            logger.debug(f"Storage-state write-back skipped: {type(e).__name__}.")
+        return
+    if verbose and changed:
+        logger.debug(writeback.describe(changed, psidts))
