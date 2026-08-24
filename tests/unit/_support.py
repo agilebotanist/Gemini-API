@@ -134,6 +134,9 @@ class IsolatedHome:
             document.update(foreign)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(document, indent=2), encoding="utf-8")
+        # 0600, like `storage_state.save` writes it. A fixture with default permissions
+        # makes `doctor` report a permissions problem the product never created.
+        auth_paths.harden_file(path)
         return path
 
 

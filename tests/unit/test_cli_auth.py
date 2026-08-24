@@ -211,7 +211,10 @@ class TestDoctorLiveCheck(unittest.TestCase):
             home.write_storage(home.own_storage())
             with captured() as (out, _err):
                 main(["doctor"])
-            self.assertNotIn("live session", out.getvalue())
+            # Not a bare "live session" search: the permissions advice says "it holds a
+            # live session cookie", which made the first version of this assertion pass
+            # for the wrong reason on Windows and fail on Linux.
+            self.assertNotIn("] live session", out.getvalue())
 
 
 class TestLogoutCommand(unittest.TestCase):
