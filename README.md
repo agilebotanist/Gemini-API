@@ -22,9 +22,29 @@
         <img src="https://github.com/HanaokaYuzu/Gemini-API/actions/workflows/pypi-publish.yml/badge.svg" alt="CI"></a>
 </p>
 
+> [!NOTE]
+> **This is a fork.** It adds a browser-based login (`gemini-web login`) that recovers an
+> expired session without a human, a session file shared with `notebooklm`, and
+> credential handling that never prints a cookie. Start at **[FORK.md](FORK.md)** for
+> what changed, **[docs/auth.md](docs/auth.md)** to use it, and
+> **[docs/adr/](docs/adr/)** for why. Everything below is upstream's documentation of
+> the client itself, which this fork tracks.
+
 # <img src="https://raw.githubusercontent.com/HanaokaYuzu/Gemini-API/master/assets/logo.svg" width="35px" alt="Gemini Icon" /> Gemini-API
 
 A reverse-engineered asynchronous Python wrapper for the [Google Gemini](https://gemini.google.com) web app (formerly Bard).
+
+## Quick start (this fork)
+
+```bash
+pip install -e ".[playwright,browser]"
+python -m playwright install chromium
+
+gemini-web login            # a browser opens; sign in once
+gemini-web auth status      # what got stored, and where
+gemini-web ask "hello"
+gemini-web login --headless # later: refresh the session with no interaction
+```
 
 ## Features
 
@@ -539,7 +559,7 @@ You can ask Gemini to generate and edit images with Nano Banana, Google's latest
 
 > [!IMPORTANT]
 >
-> Google has some limitations on Gemini's image generation feature, so availability may vary by region/account. Here's a summary copied from [official documentation](https://support.google.com/gemini/answer/14286560) (as of Sep 10, 2025):
+> Google has some limitations on Gemini's image generation feature, so availability may vary by region/account. Here's a summary copied from [official documentation](https://support.google.com/gemini-web/answer/14286560) (as of Sep 10, 2025):
 >
 > > This feature's availability in any specific Gemini app is also limited to the supported languages and countries of that app.
 > >
@@ -598,7 +618,7 @@ asyncio.run(main())
 
 > [!IMPORTANT]
 >
-> To access Gemini extensions in the API, you must activate them on the [Gemini website](https://gemini.google.com/extensions) first. As with image generation, Google also has limitations on the availability of Gemini extensions. Here's a summary copied from [official documentation](https://support.google.com/gemini/answer/13695044) (as of March 19, 2025):
+> To access Gemini extensions in the API, you must activate them on the [Gemini website](https://gemini.google.com/extensions) first. As with image generation, Google also has limitations on the availability of Gemini extensions. Here's a summary copied from [official documentation](https://support.google.com/gemini-web/answer/13695044) (as of March 19, 2025):
 >
 > > To connect apps to Gemini, you must have​​​​ Gemini Apps Activity on.
 > >
